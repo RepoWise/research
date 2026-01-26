@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-iaa_on_Annotations_Factual.py
+The barplot generates factual and non-factual evaluation results
+evaluation_annotations_analyzer.py
 
 Loads: Annotations_Factual.csv
 Columns (detected from your file):
@@ -21,305 +22,270 @@ Outputs (CSV) into --outdir (default: ./iaa_results):
 - iaa_summary.csv
 - pairwise_alpha_<SCOPE>.csv  (SCOPE = Claude / RepoWise / ChatGPT / OVERALL)
 """
-
-import argparse
-import itertools
-import math
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
-
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
+# -------------------------------
+# Load Excel
+# -------------------------------
+file_path = "data.xlsx"
+df = pd.read_excel(file_path)
 
-# -----------------------------
-# Krippendorff's alpha (nominal)
-# -----------------------------
-def krippendorff_alpha_nominal(ratings_by_annotator: List[List[Any]]) -> float:
-    """
-    Krippendorff's alpha for nominal labels.
+systems = ["RepoWise", "Claude", "ChatGPT", "Copilot"]
 
-    ratings_by_annotator: A x N list (annotators x items)
-    missing: None / NaN
+annotator_map = {
+    "A1": {
+        "RepoWise": "RepoWise_A1",
+        "Claude": "Claude_A1",
+        "ChatGPT": "ChatGPT_A1",
+        "Copilot": "Copilot_A1",
+    },
+    "A2": {
+        "RepoWise": "RepoWise_A2",
+        "Claude": "Claude_A2",
+        "ChatGPT": "ChatGPT_A2",
+        "Copilot": "Copilot_A2",
+    },
+}
 
-    Returns alpha, or NaN if not computable.
-    """
-    A = len(ratings_by_annotator)
-    if A == 0:
-        return float("nan")
-    N = len(ratings_by_annotator[0])
+# -------------------------------
+# Non-factual rank counts (1-4)
+# -------------------------------
+rank_counts = {a: {} for a in annotator_map}
+for annot, cols in annotator_map.items():
+    for sys, col in cols.items():
+        rank_counts[annot][sys] = [
+            int((df[col] == 1).sum()),
+            int((df[col] == 2).sum()),
+            int((df[col] == 3).sum()),
+            int((df[col] == 4).sum()),
+        ]
 
-    # build per-item lists with >=2 ratings
-    units = []
-    for i in range(N):
-        vals = []
-        for a in range(A):
-            v = ratings_by_annotator[a][i]
-            if v is None or (isinstance(v, float) and math.isnan(v)):
-                continue
-            vals.append(v)
-        if len(vals) >= 2:
-            units.append(vals)
+def normalize(counts):
+    s = sum(counts)
+    return [c / s for c in counts] if s else [0, 0, 0, 0]
 
-    if not units:
-        return float("nan")
+# -------------------------------
+# Factual accuracies (given)
+# -------------------------------
+factual_accuracy = {
+    "RepoWise": 0.84,
+    "Claude": 0.00,
+    "ChatGPT": 0.00,
+    "Copilot": 0.00,
+}
 
-    cats = sorted({v for u in units for v in u}, key=lambda x: str(x))
-    if len(cats) <= 1:
-        return 1.0  # everything identical
+# -------------------------------
+# Build custom Y positions
+# -------------------------------
+labels = []
+y_positions = []
+system_line = []
 
-    idx = {c: k for k, c in enumerate(cats)}
-    K = len(cats)
+# unified stacks (factual rows use s1=correct, s2=incorrect, s3/s4=0)
+s1, s2, s3, s4 = [], [], [], []
 
-    # coincidence matrix
-    O = [[0.0 for _ in range(K)] for _ in range(K)]
-    total = 0.0
+gap_between_groups = 1.3
+gap_between_systems = 1.3
+gap_within_system = 0.14
+gap_between_factual_bars = 1.4
 
-    for u in units:
-        m = len(u)
-        w = 1.0 / (m - 1.0)
-        counts: Dict[int, int] = {}
-        for v in u:
-            counts[idx[v]] = counts.get(idx[v], 0) + 1
+bar_height = 0.95
 
-        for i_cat, n_i in counts.items():
-            for j_cat, n_j in counts.items():
-                c = n_i * (n_i - 1) if i_cat == j_cat else n_i * n_j
-                O[i_cat][j_cat] += w * c
-                total += w * c
+# Factual positions
+y = 0.0
+factual_ys = []
+for sys in systems:
+    factual_ys.append(y)
+    y_positions.append(y)
+    labels.append(sys)
+    system_line.append("")
 
-    if total <= 0:
-        return float("nan")
+    acc = factual_accuracy[sys]
+    s1.append(acc)         # Correct
+    s2.append(1 - acc)     # Incorrect
+    s3.append(0.0)
+    s4.append(0.0)
 
-    diag = sum(O[i][i] for i in range(K))
-    Do = 1.0 - (diag / total)
+    y += gap_between_factual_bars
 
-    marg = [sum(O[i][j] for j in range(K)) for i in range(K)]
-    n = sum(marg)
-    if n <= 1:
-        return float("nan")
+# Separator after last factual bar
+sep_y = factual_ys[-1] + 0.75
 
-    Pe_agree = sum(mi * (mi - 1.0) for mi in marg) / (n * (n - 1.0))
-    De = 1.0 - Pe_agree
-    if De <= 0:
-        return 1.0 if Do == 0 else float("nan")
+# Start non-factual section after a gap
+y = factual_ys[-1] + gap_between_groups + 1.3
 
-    return 1.0 - (Do / De)
+# Non-factual positions: A1/A2 for each system (stacked vertically)
+nonfactual_y_min = None
+nonfactual_y_max = None
 
+for sys in systems:
+    # A1
+    y_a1 = y
+    r1, r2, r3_, r4_ = normalize(rank_counts["A1"][sys])
+    y_positions.append(y_a1)
+    labels.append("A1")
+    system_line.append(sys)
+    s1.append(r1); s2.append(r2); s3.append(r3_); s4.append(r4_)
 
-# -----------------------------
-# Fleiss' kappa (generalized for missing)
-# -----------------------------
-def fleiss_kappa_generalized(df_ann: pd.DataFrame) -> float:
-    """
-    Fleiss' kappa with per-item varying number of ratings (handles missing).
-    df_ann: items x annotators, categorical labels, missing allowed (NaN).
-    """
-    vals = df_ann.stack(dropna=True).tolist()
-    if len(vals) == 0:
-        return float("nan")
+    # A2
+    y_a2 = y + bar_height + gap_within_system
+    r1, r2, r3_, r4_ = normalize(rank_counts["A2"][sys])
+    y_positions.append(y_a2)
+    labels.append("A2")
+    system_line.append("")
+    s1.append(r1); s2.append(r2); s3.append(r3_); s4.append(r4_)
 
-    cats = sorted(set(vals), key=lambda x: str(x))
-    if len(cats) <= 1:
-        return 1.0
+    if nonfactual_y_min is None:
+        nonfactual_y_min = y_a1 - bar_height/2
+    nonfactual_y_max = y_a2 + bar_height/2
 
-    cat_index = {c: j for j, c in enumerate(cats)}
-    N_items = df_ann.shape[0]
+    y += gap_between_systems + 1.9
 
-    counts = [[0 for _ in cats] for _ in range(N_items)]
-    n_i_list = [0 for _ in range(N_items)]
+# -------------------------------
+# Plot
+# -------------------------------
+fig, ax = plt.subplots(figsize=(7.6, 4.8))
+y_arr = np.array(y_positions)
 
-    for i in range(N_items):
-        row_vals = [v for v in df_ann.iloc[i].tolist() if pd.notna(v)]
-        n_i = len(row_vals)
-        n_i_list[i] = n_i
-        for v in row_vals:
-            counts[i][cat_index[v]] += 1
+# Colors
+color_correct = "#2E7D32"    # green
+color_incorrect = "#FFA726"  # orange
+color_rank3 = "#D32F2F"      # red
+color_rank4 = "#6A1B9A"      # purple
 
-    # P_i for items with >=2 ratings
-    P_i = []
-    for i in range(N_items):
-        n_i = n_i_list[i]
-        if n_i < 2:
-            continue
-        num = sum(c * (c - 1) for c in counts[i])
-        denom = n_i * (n_i - 1)
-        P_i.append(num / denom)
+edge_color = "#2C2C2C"
+edge_width = 1.2
 
-    if len(P_i) == 0:
-        return float("nan")
+# Bars (horizontal stacked)
+ax.barh(y_arr, s1, height=bar_height, color=color_correct, edgecolor=edge_color, linewidth=edge_width)
+ax.barh(y_arr, s2, height=bar_height, left=s1, color=color_incorrect, edgecolor=edge_color, linewidth=edge_width)
+ax.barh(y_arr, s3, height=bar_height, left=np.array(s1) + np.array(s2), color=color_rank3, edgecolor=edge_color, linewidth=edge_width)
+ax.barh(y_arr, s4, height=bar_height, left=np.array(s1) + np.array(s2) + np.array(s3), color=color_rank4, edgecolor=edge_color, linewidth=edge_width)
 
-    Pbar = sum(P_i) / len(P_i)
+# Percentage labels
+for y_pos, a1, a2, a3, a4 in zip(y_arr, s1, s2, s3, s4):
+    if a1 > 0.05:
+        ax.text(a1/2, y_pos, f"{a1*100:.0f}%", ha="center", va="center",
+                fontsize=9, fontweight="bold", color="white")
+    if a2 > 0.05:
+        ax.text(a1 + a2/2, y_pos, f"{a2*100:.0f}%", ha="center", va="center",
+                fontsize=9, fontweight="bold", color="black")
+    if a3 > 0.05:
+        ax.text(a1 + a2 + a3/2, y_pos, f"{a3*100:.0f}%", ha="center", va="center",
+                fontsize=9, fontweight="bold", color="white")
+    if a4 > 0.05:
+        ax.text(a1 + a2 + a3 + a4/2, y_pos, f"{a4*100:.0f}%", ha="center", va="center",
+                fontsize=9, fontweight="bold", color="white")
 
-    total_ratings = sum(n_i_list)
-    if total_ratings == 0:
-        return float("nan")
+# Separator line
+ax.axhline(sep_y, color="#333333", linestyle="--", linewidth=2.0, alpha=0.8, zorder=5)
 
-    p = []
-    for j in range(len(cats)):
-        pj = sum(counts[i][j] for i in range(N_items)) / total_ratings
-        p.append(pj)
+# Axes: add a bit of room on the right for legends (prevents overlap)
+ax.set_xlim(0, 1.18)
+ax.set_ylim(y_arr[0] - 0.8, y_arr[-1] + 0.8)
+# ax.set_xlabel("Proportion", fontsize=11, fontweight="bold")
 
-    Pe = sum(pj * pj for pj in p)
-    if Pe >= 1.0:
-        return 1.0
+# Y-axis two-line labels
+two_line_labels = []
+for lab, syslab in zip(labels, system_line):
+    if lab == "A1":
+        two_line_labels.append(f"A1\n{syslab}")
+    elif lab == "A2":
+        two_line_labels.append("A2\n")
+    else:
+        two_line_labels.append(lab)
 
-    return (Pbar - Pe) / (1.0 - Pe)
+ax.set_yticks(y_arr)
+ax.set_yticklabels(two_line_labels, ha="right", fontsize=9, linespacing=1.15)
+ax.tick_params(axis="y", pad=10)
 
+# Grid
+ax.grid(axis="x", linestyle="--", alpha=0.4, color="gray", linewidth=0.8)
 
-# -----------------------------
-# Dataset-specific parsing
-# -----------------------------
-def parse_system_and_annotators(columns: List[str]) -> Tuple[List[str], List[str], Dict[str, Dict[str, str]]]:
-    """
-    From columns like "Claude_AA", "RepoWise_SK", ... infer:
-      systems = ["Claude","RepoWise","ChatGPT"]
-      annotators = ["AA","SK","NIK"]
-      mapping[system][annotator] -> column_name
-    """
-    mapping: Dict[str, Dict[str, str]] = {}
-    systems = set()
-    annotators = set()
+# Background regions
+factual_region = plt.Rectangle(
+    (0, factual_ys[0] - 0.7),
+    1.18,
+    sep_y - factual_ys[0] + 0.7,
+    facecolor="#E8F5E9",
+    alpha=0.25,
+    zorder=0
+)
+nonfactual_region = plt.Rectangle(
+    (0, sep_y),
+    1.18,
+    y_arr[-1] - sep_y + 0.7,
+    facecolor="#FFF3E0",
+    alpha=0.25,
+    zorder=0
+)
+ax.add_patch(factual_region)
+ax.add_patch(nonfactual_region)
 
-    for c in columns:
-        if "_" not in c:
-            continue
-        sys, ann = c.split("_", 1)
-        systems.add(sys)
-        annotators.add(ann)
-        mapping.setdefault(sys, {})[ann] = c
+# -------------------------------
+# Legends: place in whitespace, NOT over bars
+#   - Put factual legend in the factual region, near the right
+#   - Put non-factual legend in the non-factual region, near the right
+# -------------------------------
+factual_handles = [
+    Patch(facecolor=color_correct, edgecolor=edge_color, label="Correct"),
+    Patch(facecolor=color_incorrect, edgecolor=edge_color, label="Incorrect"),
+]
+nonfactual_handles = [
+    Patch(facecolor=color_correct, edgecolor=edge_color, label="Rank 1"),
+    Patch(facecolor=color_incorrect, edgecolor=edge_color, label="Rank 2"),
+    Patch(facecolor=color_rank3, edgecolor=edge_color, label="Rank 3"),
+    Patch(facecolor=color_rank4, edgecolor=edge_color, label="Rank 4"),
+]
 
-    systems_list = sorted(systems, key=lambda x: str(x))
-    annotators_list = sorted(annotators, key=lambda x: str(x))
-    return systems_list, annotators_list, mapping
+# Choose y anchor points (data coordinates) inside each region
+factual_legend_y = (factual_ys[0] + factual_ys[-1]) / 2
+nonfactual_legend_y = (nonfactual_y_min + nonfactual_y_max) / 2
 
+# Convert those to axes fraction for a stable placement
+ymin, ymax = ax.get_ylim()
+factual_y_frac = (factual_legend_y - ymin) / (ymax - ymin)
+nonfactual_y_frac = (nonfactual_legend_y - ymin) / (ymax - ymin)
 
-def pairwise_alpha_table(df_ann: pd.DataFrame, annotators: List[str]) -> pd.DataFrame:
-    """
-    Returns a pairwise alpha table (wide), with diagonal=1.
-    """
-    out = pd.DataFrame(index=annotators, columns=annotators, dtype=float)
-    for a in annotators:
-        out.loc[a, a] = 1.0
+# Place legends at x=0.985 (inside the axes), centered in each region
+leg1 = ax.legend(
+    handles=factual_handles,
+    title="Factual",
+    loc="center right",
+    bbox_to_anchor=(0.985, factual_y_frac),
+    frameon=True,
+    shadow=True,
+    fontsize=8,
+    title_fontsize=9,
+    fancybox=True,
+    framealpha=0.95
+)
+ax.add_artist(leg1)
 
-    for a, b in itertools.combinations(annotators, 2):
-        alpha = krippendorff_alpha_nominal([df_ann[a].tolist(), df_ann[b].tolist()])
-        out.loc[a, b] = alpha
-        out.loc[b, a] = alpha
-    return out
+ax.legend(
+    handles=nonfactual_handles,
+    title="Non-Factual",
+    loc="center right",
+    bbox_to_anchor=(0.985, nonfactual_y_frac),
+    frameon=True,
+    shadow=True,
+    fontsize=8,
+    title_fontsize=9,
+    fancybox=True,
+    framealpha=0.95
+)
 
+plt.tight_layout()
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--csv",
-        default="Annotations_Factual.csv",
-        help="CSV file name (default: Annotations_Factual.csv). If not found, we try the same name under /mnt/data/.",
-    )
-    ap.add_argument("--outdir", default="iaa_results", help="Output directory (default: iaa_results)")
-    args = ap.parse_args()
+plt.savefig(
+    "evaluation_findings.pdf",
+    format="pdf",
+    bbox_inches="tight",
+    dpi=300
+)
 
-    csv_path = Path(args.csv)
-    if not csv_path.exists():
-        alt = Path("/mnt/data") / csv_path.name
-        if alt.exists():
-            csv_path = alt
-        else:
-            raise FileNotFoundError(f"Could not find '{args.csv}' or '{alt}'")
+plt.show()
 
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
-
-    df = pd.read_csv(csv_path)
-
-    # Your file's non-annotation columns:
-    non_ann = {"Repo", "Q#", "Question"}
-    ann_cols = [c for c in df.columns if c not in non_ann]
-
-    systems, annotators, mapping = parse_system_and_annotators(ann_cols)
-
-    # Compute per-system IAA (items = rows, raters = annotators)
-    summary_rows = []
-
-    for sys in systems:
-        # build items x annotators frame for that system
-        cols_for_sys = {ann: mapping[sys].get(ann) for ann in annotators}
-        missing_cols = [ann for ann, col in cols_for_sys.items() if col is None]
-        if missing_cols:
-            raise ValueError(f"Missing columns for system={sys}: {missing_cols}")
-
-        df_sys = pd.DataFrame({ann: df[col] for ann, col in cols_for_sys.items()})
-
-        # pairwise alpha
-        alpha_mat = pairwise_alpha_table(df_sys, annotators)
-        alpha_mat.to_csv(outdir / f"pairwise_alpha_{sys}.csv", index=True)
-
-        # average pairwise alpha
-        pair_vals = []
-        for a, b in itertools.combinations(annotators, 2):
-            pair_vals.append(alpha_mat.loc[a, b])
-        avg_pair_alpha = float(pd.Series(pair_vals).mean(skipna=True))
-
-        # fleiss kappa
-        fk = fleiss_kappa_generalized(df_sys)
-
-        # also compute all-annotator alpha for that sys (useful sanity check)
-        all_alpha = krippendorff_alpha_nominal([df_sys[a].tolist() for a in annotators])
-
-        summary_rows.append(
-            {
-                "scope": sys,
-                "annotators": ",".join(annotators),
-                "n_items": int(df_sys.shape[0]),
-                "avg_pairwise_alpha_nominal": avg_pair_alpha,
-                "all_annotator_alpha_nominal": all_alpha,
-                "fleiss_kappa": fk,
-            }
-        )
-
-    # Compute OVERALL agreement by stacking system judgments as items
-    # item = (row, system); raters = annotators
-    overall_rows = []
-    for i in range(df.shape[0]):
-        for sys in systems:
-            row = {"system": sys}
-            for ann in annotators:
-                row[ann] = df.loc[i, mapping[sys][ann]]
-            overall_rows.append(row)
-
-    df_overall = pd.DataFrame(overall_rows)[annotators]
-
-    overall_alpha_mat = pairwise_alpha_table(df_overall, annotators)
-    overall_alpha_mat.to_csv(outdir / "pairwise_alpha_OVERALL.csv", index=True)
-
-    overall_pair_vals = []
-    for a, b in itertools.combinations(annotators, 2):
-        overall_pair_vals.append(overall_alpha_mat.loc[a, b])
-    overall_avg_pair_alpha = float(pd.Series(overall_pair_vals).mean(skipna=True))
-    overall_fk = fleiss_kappa_generalized(df_overall)
-    overall_all_alpha = krippendorff_alpha_nominal([df_overall[a].tolist() for a in annotators])
-
-    summary_rows.append(
-        {
-            "scope": "OVERALL",
-            "annotators": ",".join(annotators),
-            "n_items": int(df_overall.shape[0]),
-            "avg_pairwise_alpha_nominal": overall_avg_pair_alpha,
-            "all_annotator_alpha_nominal": overall_all_alpha,
-            "fleiss_kappa": overall_fk,
-        }
-    )
-
-    summary_df = pd.DataFrame(summary_rows)
-    summary_df.to_csv(outdir / "iaa_summary.csv", index=False)
-
-    print(f"Loaded: {csv_path}")
-    print("Detected systems:", systems)
-    print("Detected annotators:", annotators)
-    print("\nSummary:")
-    with pd.option_context("display.max_columns", None):
-        print(summary_df)
-    print(f"\nSaved results to: {outdir.resolve()}")
-
-
-if __name__ == "__main__":
-    main()
