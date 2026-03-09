@@ -1,0 +1,57 @@
+flowchart TD
+    FE["Chat Interface"]:::frontend
+    API["REST API"]:::api
+    IC["**Intent Classifier**\n*LLM Few-Shot CoT*\n*(97.6% Accuracy)*"]:::classifier
+
+    subgraph QP["Query Processors"]
+        RAG["RAG Engine"]:::qpInner
+        DQE["Data Query Engine"]:::qpInner
+        SR["Static Response"]:::static
+    end
+
+    LLM["LLM Client\n*Mistral 7B*"]:::llm
+
+    subgraph EXT["External Services"]
+        GH["GitHub API"]:::extInner
+        OL["Ollama Server"]:::extInner
+    end
+
+    subgraph STORE["Storage Layer"]
+        CDB[("ChromaDB\nVector Store")]:::storageNode
+        DFC[("DataFrame Cache\nCommits/Issues")]:::storageNode
+    end
+
+    FE -->|Query| API
+    API --> IC
+
+    IC -->|PROJECT_DOC_BASED| RAG
+    IC -->|COMMITS/ISSUES| DQE
+    IC -.->|OUT_OF_SCOPE| SR
+    IC -->|GENERAL| RAG
+
+    RAG -->|Context| LLM
+    DQE -->|Context| LLM
+
+    LLM -->|Generate| OL
+
+    SR -.->|Fixed Message| API
+    LLM -->|Generated Response| API
+
+    RAG -->|Semantic Search| CDB
+    DQE -->|Pandas Query| DFC
+
+    GH -.->|Fetch Docs| CDB
+    GH -.->|Fetch Commits & Issues| DFC
+
+    classDef frontend fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#000
+    classDef api fill:#a855f7,stroke:#7e22ce,stroke-width:2px,color:#fff
+    classDef classifier fill:#fb923c,stroke:#ea580c,stroke-width:3px,color:#7c2d12
+    classDef qpInner fill:#16a34a,stroke:#15803d,stroke-width:2px,color:#fff
+    classDef static fill:#dcfce7,stroke:#16a34a,stroke-width:2px,stroke-dasharray:6 4,color:#000
+    classDef llm fill:#7e22ce,stroke:#581c87,stroke-width:2px,color:#fff
+    classDef extInner fill:#db2777,stroke:#be185d,stroke-width:2px,color:#fff
+    classDef storageNode fill:#0d9488,stroke:#0f766e,stroke-width:2px,color:#fff
+
+    style QP fill:#dcfce7,stroke:#16a34a,stroke-width:2px,color:#15803d
+    style EXT fill:#fce7f3,stroke:#db2777,stroke-width:2px,color:#be185d
+    style STORE fill:#ccfbf1,stroke:#0d9488,stroke-width:2px,color:#0f766e
